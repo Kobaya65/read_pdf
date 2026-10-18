@@ -16,8 +16,8 @@ EVOLUTION
 """
 
 from pathlib import Path
-import re
-import sys
+from re import fullmatch, sub
+from sys import argv, exit
 
 import pandas as pd
 import pdfplumber
@@ -41,7 +41,7 @@ JUSTIFY_TOL = 2.0  # tolérance en points pour considérer que la marge est atte
 
 
 def extract_words_by_column(page: pdfplumber.page.Page) -> list[dict]:
-    """    Extrait tous les mots de la page et les assigne à une colonne selon leur x.
+    """Extrait tous les mots de la page et les assigne à une colonne selon leur x.
     Retourne une liste de dicts : {"text", "x0", "x1", "top", "bottom", "column"}
 
     :param page: page du pdf
@@ -154,9 +154,9 @@ def clean_description(description: str) -> str:
     :param description: description brute extraite du PDF
     :return: description normalisée
     """
-    description = re.sub(r"\s+", " ", description).strip()
-    description = re.sub(r"McDonald\s+s\b", "McDonald's", description)
-    description = re.sub(r"McDonald's\s+s\b", "McDonald's", description)
+    description = sub(r"\s+", " ", description).strip()
+    description = sub(r"McDonald\s+s\b", "McDonald's", description)
+    description = sub(r"McDonald's\s+s\b", "McDonald's", description)
     return description
 
 
@@ -167,7 +167,7 @@ def numeric_value(text: str) -> str | None:
     :return: texte nettoyé si numérique, sinon None
     """
     cleaned = text.strip("()")
-    return cleaned if re.fullmatch(r"[\d.,]+", cleaned) else None
+    return cleaned if fullmatch(r"[\d.,]+", cleaned) else None
 
 
 def parse_page(page: pdfplumber.page.Page) -> list[dict]:
@@ -267,7 +267,7 @@ def to_float(val: str) -> float | None:
     """
     if not val:
         return None
-    cleaned = re.sub(r"[€\s]", "", str(val)).replace(",", ".")
+    cleaned = sub(r"[€\s]", "", str(val)).replace(",", ".")
     try:
         return float(cleaned)
     except ValueError:
@@ -306,18 +306,18 @@ def debug_positions(pdf_path: str) -> None:
 
 
 if __name__ == "__main__":
-    pdf_path = sys.argv[1] if len(sys.argv) > 1 else "/home/kobaya/Téléchargements/chargemap_20260925-07896428.pdf"
-    output = sys.argv[2] if len(sys.argv) > 2 else "facture_chargemap.ods"
+    pdf_path = argv[1] if len(argv) > 1 else "/home/kobaya/Téléchargements/chargemap_20260925-07896428.pdf"
+    output = argv[2] if len(argv) > 2 else "facture_chargemap.ods"
 
     if not Path(pdf_path).exists():
         print(f"❌ Fichier introuvable : {pdf_path}")
-        sys.exit(1)
+        exit(1)
 
     recharges = parse_pdf(pdf_path)
     if not recharges:
         print("⚠️  Aucune ligne extraite. Ajustez les bornes COLUMNS / DESC_RIGHT.")
         debug_positions(pdf_path)
-        sys.exit(1)
+        exit(1)
 
     debug_positions(pdf_path)
 
