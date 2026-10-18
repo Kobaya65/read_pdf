@@ -10,6 +10,9 @@ Jointure des lignes visuelles : on colle deux lignes quand la ligne du haut est
 JUSTIFIÉE (son dernier mot atteint la marge droite de la colonne), signe d'une
 coupure de mot. Sinon on insère un espace. La casse est ignorée, car elle ne
 porte aucune information fiable (ex : "Mc" + "Donald" = coupure avec majuscule).
+
+EVOLUTION
+- modifier le code pour traiter un ensemble de fichier pdf
 """
 
 from pathlib import Path
@@ -23,12 +26,12 @@ import pdfplumber
 # ─── Configuration des colonnes ───────────────────────────────────────────────
 # Plages X pour chaque colonne (à ajuster selon le PDF, mais stables pour Chargemap).
 COLUMNS = {
-    "description": (0, 340),
-    "pu_ht":       (340, 400),
-    "quantite":    (400, 435),
-    "tva_pct":     (435, 490),
-    "tva_montant": (490, 545),
-    "total_ht":    (545, 620),
+    "description": (0, 355),
+    "pu_ht":       (355, 420),
+    "quantite":    (420, 480),
+    "tva_pct":     (480, 540),
+    "tva_montant": (540, 600),
+    "total_ht":    (600, 700),
 }
 
 # Borne droite de la zone de rendu de la colonne description, utilisée pour
@@ -38,9 +41,11 @@ JUSTIFY_TOL = 2.0  # tolérance en points pour considérer que la marge est atte
 
 
 def extract_words_by_column(page: pdfplumber.page.Page) -> list[dict]:
-    """
-    Extrait tous les mots de la page et les assigne à une colonne selon leur x.
+    """    Extrait tous les mots de la page et les assigne à une colonne selon leur x.
     Retourne une liste de dicts : {"text", "x0", "x1", "top", "bottom", "column"}
+
+    :param page: page du pdf
+    :return: liste des mots avec leur position et colonne assignée
     """
     words = page.extract_words(
         x_tolerance=2,
@@ -70,33 +75,42 @@ def extract_words_by_column(page: pdfplumber.page.Page) -> list[dict]:
 
 
 def find_row_boundaries(words: list[dict]) -> list[tuple[float, float]]:
-    """
-    Identifie les lignes logiques en cherchant les mots "Charge" qui marquent
-    le début de chaque entrée. Retourne une liste de (y_start, y_end).
+    """Identifie les lignes logiques en cherchant les mots "Charge" qui marquent
+    le début de chaque entrée. La borne basse est bornée par la fin de la zone
+    de données (pied de page exclu). Retourne une liste de (y_start, y_end).
+
+    :param words: liste des mots avec leur position et colonne assignée
+    :return: liste de (y_start, y_end) pour chaque ligne logique
     """
     charge_tops = sorted(
         w["top"] for w in words
         if w["column"] == "description" and w["text"] == "Charge"
     )
-
     if not charge_tops:
         return []
 
+    # Fin de zone de données : premier marqueur de total / pied de page
+    END_MARKERS = {"Total", "Conditions", "Chargemap", "Net"}
+    end_candidates = [
+        w["top"] for w in words
+        if w["text"] in END_MARKERS and w["top"] > charge_tops[-1]
+    ]
+    data_end = min(end_candidates) if end_candidates else max(w["bottom"] for w in words)
+
     boundaries = []
     for i, top in enumerate(charge_tops):
-        if i + 1 < len(charge_tops):
-            bottom_limit = charge_tops[i + 1]
-        else:
-            bottom_limit = max(w["bottom"] for w in words)
-        boundaries.append((top, bottom_limit))
+        next_charge = charge_tops[i + 1] if i + 1 < len(charge_tops) else data_end
+        boundaries.append((top, min(next_charge, data_end)))
 
     return boundaries
 
 
 def group_words_by_visual_line(words_in_col: list[dict]) -> list[tuple[str, float, float]]:
-    """
-    Retourne une liste de (texte, x0_premier_mot, x1_dernier_mot), une entrée
+    """Retourne une liste de (texte, x0_premier_mot, x1_dernier_mot), une entrée
     par ligne visuelle (même 'top' arrondi).
+
+    :param words_in_col: liste des mots d'une colonne (ex: description) pour une ligne logique
+    :return : liste des lignes visuelles avec leur texte et positions x
     """
     by_top: dict[int, list[tuple[float, float, str]]] = {}
     for w in words_in_col:
@@ -114,8 +128,7 @@ def group_words_by_visual_line(words_in_col: list[dict]) -> list[tuple[str, floa
 def join_visual_lines(lines: list[tuple[str, float, float]],
                       col_right: float,
                       tol: float = 2.0) -> str:
-    """
-    Joint des lignes visuelles en une chaîne.
+    """Joint des lignes visuelles en une chaîne.
     Colle (sans espace) si la ligne précédente est justifiée, c.-à-d. que son
     dernier mot atteint la marge droite de la colonne (= mot coupé).
     Sinon, insère un espace.
@@ -136,15 +149,33 @@ def join_visual_lines(lines: list[tuple[str, float, float]],
 
 
 def clean_description(description: str) -> str:
-    """Normalise les artefacts restants (apostrophe perdue, espaces multiples)."""
+    """Normalise les artefacts restants (apostrophe perdue, espaces multiples).
+
+    :param description: description brute extraite du PDF
+    :return: description normalisée
+    """
     description = re.sub(r"\s+", " ", description).strip()
     description = re.sub(r"McDonald\s+s\b", "McDonald's", description)
     description = re.sub(r"McDonald's\s+s\b", "McDonald's", description)
     return description
 
 
+def numeric_value(text: str) -> str | None:
+    """Tokens numériques de la zone droite, en retirant les parenthèses.
+
+    :param text: texte brut
+    :return: texte nettoyé si numérique, sinon None
+    """
+    cleaned = text.strip("()")
+    return cleaned if re.fullmatch(r"[\d.,]+", cleaned) else None
+
+
 def parse_page(page: pdfplumber.page.Page) -> list[dict]:
-    """Parse une page et retourne les lignes de charges."""
+    """Parse une page et retourne les lignes de charges.
+
+    :param page: page du pdf
+    :return: liste des lignes de charges
+    """
     words = extract_words_by_column(page)
     boundaries = find_row_boundaries(words)
 
@@ -160,23 +191,48 @@ def parse_page(page: pdfplumber.page.Page) -> list[dict]:
             join_visual_lines(desc_lines, col_right=DESC_RIGHT, tol=JUSTIFY_TOL)
         )
 
-        # Autres colonnes : simple concaténation (pas de wrap de mot problématique)
+        # Autres colonnes : identification par CONTENU (robuste au décalage de bornes)
         cells: dict[str, list[str]] = {col: [] for col in COLUMNS}
         for w in row_words:
             cells[w["column"]].append(w["text"])
 
-        pu_ht = next((t for t in cells["pu_ht"] if re.match(r"[\d.,]+\s*€?", t)), "")
-        quantite = next((t for t in cells["quantite"] if re.match(r"^\d+$", t)), "")
-        tva_pct = next((t for t in cells["tva_pct"] if re.match(r"[\d.,]+\s*%?", t)), "")
+        # Regroupement par ligne visuelle (même 'top' arrondi), dans l'ordre de lecture
+        by_top: dict[int, list[tuple[float, float]]] = {}  # top -> [(x0, valeur), ...]
+        for w in row_words:
+            if w["x0"] < COLUMNS["pu_ht"][0]:
+                continue
+            val = numeric_value(w["text"])
+            if val is not None:
+                by_top.setdefault(round(w["top"]), []).append((w["x0"], val))
 
-        tva_montant = ""
-        for t in cells["tva_montant"]:
-            cleaned = t.strip("()")
-            if re.match(r"[\d.,]+\s*€?", cleaned):
-                tva_montant = cleaned
-                break
+        visual_lines = [
+            [v for _, v in sorted(cells)]
+            for _, cells in sorted(by_top.items())
+        ]
 
-        total_ht = next((t for t in cells["total_ht"] if re.match(r"[\d.,]+\s*€?", t)), "")
+        # Mapping par structure physique de la facture :
+        #   ligne 1 = [PU, quantité, taux]   ligne 2 = [TVA montant]   ligne 3 = [Total HT]
+        pu_ht = quantite = tva_pct = tva_montant = total_ht = ""
+        if len(visual_lines) >= 1:
+            l1 = visual_lines[0]
+            pu_ht    = l1[0] if len(l1) >= 1 else ""
+            quantite = l1[1] if len(l1) >= 2 else ""
+            tva_pct  = l1[2] if len(l1) >= 3 else ""
+        if len(visual_lines) >= 2:
+            tva_montant = visual_lines[1][0] if visual_lines[1] else ""
+        if len(visual_lines) >= 3:
+            total_ht = visual_lines[2][0] if visual_lines[2] else ""
+
+        # Garde-fou de cohérence : si total HT manquant, il égale le PU
+        # (sur cette facture Total HT == PU car quantité = 1) ; sinon on garde
+        # la valeur extraite. TVA montant = PU × taux/100 en secours.
+        try:
+            if pu_ht and tva_pct and not tva_montant:
+                tva_montant = f"{round(float(pu_ht) * float(tva_pct) / 100, 2):.2f}"
+            if pu_ht and not total_ht:
+                total_ht = pu_ht
+        except ValueError:
+            pass
 
         rows.append({
             "description": description,
@@ -191,7 +247,11 @@ def parse_page(page: pdfplumber.page.Page) -> list[dict]:
 
 
 def parse_pdf(pdf_path: str) -> list[dict]:
-    """Parse l'ensemble du PDF."""
+    """Parse l'ensemble du PDF.
+
+    :param pdf_path: chemin vers le fichier PDF
+    :return: liste des lignes de charges
+    """
     all_rows = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -200,7 +260,11 @@ def parse_pdf(pdf_path: str) -> list[dict]:
 
 
 def to_float(val: str) -> float | None:
-    """Convertit '6.25 €' ou '11,50' en float."""
+    """Convertit '6.25 €' ou '11,50' en float.
+
+    :param val: valeur à convertir
+    :return: valeur convertie ou None
+    """
     if not val:
         return None
     cleaned = re.sub(r"[€\s]", "", str(val)).replace(",", ".")
@@ -210,8 +274,12 @@ def to_float(val: str) -> float | None:
         return None
 
 
-def export(recharges: list[dict], output: str = "facture_chargemap.ods"):
-    """Exporte vers ODS ou XLSX."""
+def export(recharges: list[dict[str, str]], output: str = "facture_chargemap.ods"):
+    """Exporte vers ODS ou XLSX.
+
+    :param recharges: liste des recharges
+    :param output: nom du fichier de sortie,  par défaut "facture_chargemap.ods"
+    """
     df = pd.DataFrame(recharges)
 
     for col in ["pu_ht", "tva_montant", "total_ht"]:
@@ -226,16 +294,19 @@ def export(recharges: list[dict], output: str = "facture_chargemap.ods"):
 
 
 def debug_positions(pdf_path: str) -> None:
-    """Affiche les positions x des mots pour calibrer COLUMNS et DESC_RIGHT."""
+    """Affiche les positions x des mots pour calibrer COLUMNS et DESC_RIGHT.
+
+    :param pdf_path: chemin vers le fichier PDF
+    """
     with pdfplumber.open(pdf_path) as pdf:
         words = pdf.pages[0].extract_words(x_tolerance=2, y_tolerance=3)
-        print("\nPositions X (échantillon) :")
-        for w in words[:60]:
-            print(f"  x0={w['x0']:.1f}  x1={w['x1']:.1f}  top={w['top']:.1f}  '{w['text']}'")
+        with open("positions_debug.txt", "w", encoding="utf-8") as f:
+            for w in words:
+                f.write(f"  x0={w['x0']:05.1f}  x1={w['x1']:05.1f}  top={w['top']:05.1f}  '{w['text']}'\n")
 
 
 if __name__ == "__main__":
-    pdf_path = sys.argv[1] if len(sys.argv) > 1 else "chargemap_20260925-07896428.pdf"
+    pdf_path = sys.argv[1] if len(sys.argv) > 1 else "/home/kobaya/Téléchargements/chargemap_20260925-07896428.pdf"
     output = sys.argv[2] if len(sys.argv) > 2 else "facture_chargemap.ods"
 
     if not Path(pdf_path).exists():
@@ -247,5 +318,7 @@ if __name__ == "__main__":
         print("⚠️  Aucune ligne extraite. Ajustez les bornes COLUMNS / DESC_RIGHT.")
         debug_positions(pdf_path)
         sys.exit(1)
+
+    debug_positions(pdf_path)
 
     export(recharges, output)
