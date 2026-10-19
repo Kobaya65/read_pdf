@@ -12,11 +12,12 @@ coupure de mot. Sinon on insère un espace. La casse est ignorée, car elle ne
 porte aucune information fiable (ex : "Mc" + "Donald" = coupure avec majuscule).
 
 EVOLUTION
-- modifier le code pour traiter un ensemble de fichier pdf
+- extraire date et heure de description pour les mettre dans des colonnes séparées
 """
 
+from os import listdir
 from pathlib import Path
-from re import fullmatch, sub
+from re import compile, fullmatch, sub
 from sys import argv, exit
 
 import pandas as pd
@@ -38,6 +39,32 @@ COLUMNS = {
 # détecter la justification. À calibrer via le mode debug si besoin.
 DESC_RIGHT = COLUMNS["description"][1]
 JUSTIFY_TOL = 2.0  # tolérance en points pour considérer que la marge est atteinte
+
+
+def main():
+    pdf_path = argv[1] if len(argv) > 1 else "/home/kobaya/Téléchargements"
+    output = argv[2] if len(argv) > 2 else "facture_chargemap.ods"
+    recharges = []
+
+    if not Path(pdf_path).exists():
+        print(f"❌ Fichier introuvable : {pdf_path}")
+        exit(1)
+
+    pattern = compile(r'^chargemap_\d{8}-\d{8}\.pdf$')
+
+    files = [f for f in listdir(pdf_path) if pattern.match(f)]
+
+    for f in files:
+        file = Path(pdf_path, f)
+        print(file)
+        res = parse_pdf(file)
+        recharges.extend(res)
+
+    if not recharges:
+        print("⚠️  Aucune ligne extraite. Ajustez les bornes COLUMNS / DESC_RIGHT.")
+        debug_positions(pdf_path)
+    else:
+        export(recharges, output)
 
 
 def extract_words_by_column(page: pdfplumber.page.Page) -> list[dict]:
@@ -246,7 +273,7 @@ def parse_page(page: pdfplumber.page.Page) -> list[dict]:
     return rows
 
 
-def parse_pdf(pdf_path: str) -> list[dict]:
+def parse_pdf(pdf_path: Path) -> list[dict]:
     """Parse l'ensemble du PDF.
 
     :param pdf_path: chemin vers le fichier PDF
@@ -282,7 +309,7 @@ def export(recharges: list[dict[str, str]], output: str = "facture_chargemap.ods
     """
     df = pd.DataFrame(recharges)
 
-    for col in ["pu_ht", "tva_montant", "total_ht"]:
+    for col in ["pu_ht", "tva_montant", "tva_pct", "total_ht"]:
         df[col] = df[col].map(to_float)
     df["quantite"] = pd.to_numeric(df["quantite"], errors="coerce")
 
@@ -306,19 +333,4 @@ def debug_positions(pdf_path: str) -> None:
 
 
 if __name__ == "__main__":
-    pdf_path = argv[1] if len(argv) > 1 else "/home/kobaya/Téléchargements/chargemap_20260925-07896428.pdf"
-    output = argv[2] if len(argv) > 2 else "facture_chargemap.ods"
-
-    if not Path(pdf_path).exists():
-        print(f"❌ Fichier introuvable : {pdf_path}")
-        exit(1)
-
-    recharges = parse_pdf(pdf_path)
-    if not recharges:
-        print("⚠️  Aucune ligne extraite. Ajustez les bornes COLUMNS / DESC_RIGHT.")
-        debug_positions(pdf_path)
-        exit(1)
-
-    debug_positions(pdf_path)
-
-    export(recharges, output)
+    main()
