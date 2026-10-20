@@ -338,7 +338,7 @@ def to_float(val: str) -> float | None:
         return None
 
 
-def export(recharges: list[dict[str, str]], output: str) -> None:
+def export(recharges: list[dict[str, str]], output: Path) -> None:
     """Exporte vers ODS ou XLSX.
 
     :param recharges: liste des recharges
@@ -361,7 +361,7 @@ def export(recharges: list[dict[str, str]], output: str) -> None:
             "total_ht", "total_ttc"]
     df = df[ordre]
 
-    engine = "odf" if output.endswith(".ods") else "openpyxl"
+    engine = "odf" if output.__str__().endswith(".ods") else "openpyxl"
     with pd.ExcelWriter(output, engine=engine) as writer:
         df.to_excel(writer, sheet_name="Recharges", index=False)
 
