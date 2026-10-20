@@ -60,7 +60,7 @@ JUSTIFY_TOL = 2.0  # tolérance en points pour considérer que la marge est atte
 
 
 def main() -> None:
-    pdf_path = argv[1] if len(argv) > 1 else "/home/kobaya/Téléchargements"
+    pdf_path = argv[1] if len(argv) > 1 else "/home/kobaya/Téléchargements/chargemap"
     output = argv[2] if len(argv) > 2 else "facture_chargemap.ods"
     recharges = []
 
@@ -68,7 +68,7 @@ def main() -> None:
         print(f"❌ Fichier introuvable : {pdf_path}")
         exit(1)
 
-    pattern = compile(r'^chargemap_\d{8}-\d{8}\.pdf$')
+    pattern = compile(r'^\d{8}-\d{8}\.pdf$')
 
     files = [f for f in listdir(pdf_path) if pattern.match(f)]
 
@@ -355,7 +355,7 @@ def export(recharges: list[dict[str, str]], output: str = "facture_chargemap.ods
     df["total_ttc"] = df[TOTAL_HT] + df[TVA_MONTANT]
     # création de la colonne mois
     df["mois"] = df[DATE_HEURE].dt.to_period("M") 
-    ordre = ["description", "date_hxwwwwwwwwwwwwwwwwwwwwwwwwwwwwweure", "mois",
+    ordre = ["description", "date_heure", "mois",
             "pu_ht", "quantite", "tva_pct", "tva_montant",
             "total_ht", "total_ttc"]
     df = df[ordre]
