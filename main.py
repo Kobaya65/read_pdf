@@ -24,6 +24,7 @@ import pandas as pd
 import pdfplumber
 
 BOTTOM = "bottom"
+CHARGEMAP_PATH = "/home/kobaya/Téléchargements/chargemap"
 COERCE = "coerce"
 COLUMN = "column"
 DATE_HEURE = "date_heure"
@@ -60,8 +61,8 @@ JUSTIFY_TOL = 2.0  # tolérance en points pour considérer que la marge est atte
 
 
 def main() -> None:
-    pdf_path = argv[1] if len(argv) > 1 else "/home/kobaya/Téléchargements/chargemap"
-    output = argv[2] if len(argv) > 2 else "facture_chargemap.ods"
+    pdf_path = argv[1] if len(argv) > 1 else CHARGEMAP_PATH
+    output = argv[2] if len(argv) > 2 else Path(CHARGEMAP_PATH, "factures_chargemap.ods")
     recharges = []
 
     if not Path(pdf_path).exists():
@@ -337,11 +338,11 @@ def to_float(val: str) -> float | None:
         return None
 
 
-def export(recharges: list[dict[str, str]], output: str = "facture_chargemap.ods") -> None:
+def export(recharges: list[dict[str, str]], output: str) -> None:
     """Exporte vers ODS ou XLSX.
 
     :param recharges: liste des recharges
-    :param output: nom du fichier de sortie,  par défaut "facture_chargemap.ods"
+    :param output: nom du fichier de sortie
     """
     df = pd.DataFrame(recharges)
 
