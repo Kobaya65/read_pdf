@@ -14,34 +14,52 @@ porte aucune information fiable (ex : "Mc" + "Donald" = coupure avec majuscule).
 EVOLUTION
 - extraire date et heure de description pour les mettre dans des colonnes séparées
 """
-
+from datetime import datetime
 from os import listdir
 from pathlib import Path
-from re import compile, fullmatch, sub
+from re import compile, fullmatch, search, sub
 from sys import argv, exit
 
 import pandas as pd
 import pdfplumber
 
+BOTTOM = "bottom"
+COERCE = "coerce"
+COLUMN = "column"
+DATE_HEURE = "date_heure"
+DESCRIPTION = "description"
+PU_HT = "pu_ht"
+QUANTITE = "quantite"
+TEXT = "text"
+TOP = "top"
+TVA_MONTANT = "tva_montant"
+TVA_PCT = "tva_pct"
+TOTAL_HT = "total_ht"
+X0 = "x0"
+X1 = "x1"
 
 # ─── Configuration des colonnes ───────────────────────────────────────────────
 # Plages X pour chaque colonne (à ajuster selon le PDF, mais stables pour Chargemap).
 COLUMNS = {
-    "description": (0, 355),
-    "pu_ht":       (355, 420),
-    "quantite":    (420, 480),
-    "tva_pct":     (480, 540),
-    "tva_montant": (540, 600),
-    "total_ht":    (600, 700),
+    DESCRIPTION: (0, 355),
+    PU_HT:       (355, 420),
+    QUANTITE:    (420, 480),
+    TVA_PCT:     (480, 540),
+    TVA_MONTANT: (540, 600),
+    TOTAL_HT:    (600, 700),
+}
+MOIS = {
+    "janvier": 1, "février": 2, "mars": 3, "avril": 4,"mai": 5, "juin": 6,
+    "juillet": 7, "août": 8, "septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12
 }
 
 # Borne droite de la zone de rendu de la colonne description, utilisée pour
 # détecter la justification. À calibrer via le mode debug si besoin.
-DESC_RIGHT = COLUMNS["description"][1]
+DESC_RIGHT = COLUMNS[DESCRIPTION][1]
 JUSTIFY_TOL = 2.0  # tolérance en points pour considérer que la marge est atteinte
 
 
-def main():
+def main() -> None:
     pdf_path = argv[1] if len(argv) > 1 else "/home/kobaya/Téléchargements"
     output = argv[2] if len(argv) > 2 else "facture_chargemap.ods"
     recharges = []
@@ -56,9 +74,7 @@ def main():
 
     for f in files:
         file = Path(pdf_path, f)
-        print(file)
-        res = parse_pdf(file)
-        recharges.extend(res)
+        recharges.extend(parse_pdf(file))
 
     if not recharges:
         print("⚠️  Aucune ligne extraite. Ajustez les bornes COLUMNS / DESC_RIGHT.")
@@ -83,7 +99,7 @@ def extract_words_by_column(page: pdfplumber.page.Page) -> list[dict]:
 
     result = []
     for w in words:
-        cx = (w["x0"] + w["x1"]) / 2  # centre du mot pour l'assignation de colonne
+        cx = (w[X0] + w[X1]) / 2  # centre du mot pour l'assignation de colonne
         col = None
         for name, (x_min, x_max) in COLUMNS.items():
             if x_min <= cx < x_max:
@@ -91,13 +107,14 @@ def extract_words_by_column(page: pdfplumber.page.Page) -> list[dict]:
                 break
         if col:
             result.append({
-                "text": w["text"],
-                "x0": w["x0"],
-                "x1": w["x1"],
-                "top": w["top"],
-                "bottom": w["bottom"],
-                "column": col,
+                TEXT: w[TEXT],
+                X0: w[X0],
+                X1: w[X1],
+                TOP: w[TOP],
+                BOTTOM: w[BOTTOM],
+                COLUMN: col,
             })
+
     return result
 
 
@@ -110,8 +127,8 @@ def find_row_boundaries(words: list[dict]) -> list[tuple[float, float]]:
     :return: liste de (y_start, y_end) pour chaque ligne logique
     """
     charge_tops = sorted(
-        w["top"] for w in words
-        if w["column"] == "description" and w["text"] == "Charge"
+        w[TOP] for w in words
+        if w[COLUMN] == DESCRIPTION and w[TEXT] == "Charge"
     )
     if not charge_tops:
         return []
@@ -119,10 +136,10 @@ def find_row_boundaries(words: list[dict]) -> list[tuple[float, float]]:
     # Fin de zone de données : premier marqueur de total / pied de page
     END_MARKERS = {"Total", "Conditions", "Chargemap", "Net"}
     end_candidates = [
-        w["top"] for w in words
-        if w["text"] in END_MARKERS and w["top"] > charge_tops[-1]
+        w[TOP] for w in words
+        if w[TEXT] in END_MARKERS and w[TOP] > charge_tops[-1]
     ]
-    data_end = min(end_candidates) if end_candidates else max(w["bottom"] for w in words)
+    data_end = min(end_candidates) if end_candidates else max(w[BOTTOM] for w in words)
 
     boundaries = []
     for i, top in enumerate(charge_tops):
@@ -141,14 +158,15 @@ def group_words_by_visual_line(words_in_col: list[dict]) -> list[tuple[str, floa
     """
     by_top: dict[int, list[tuple[float, float, str]]] = {}
     for w in words_in_col:
-        by_top.setdefault(round(w["top"]), []).append(
-            (w["x0"], w["x1"], w["text"])
+        by_top.setdefault(round(w[TOP]), []).append(
+            (w[X0], w[X1], w[TEXT])
         )
     out = []
     for _, cells in sorted(by_top.items()):
         cells.sort()
         text = " ".join(t for _, _, t in cells)
         out.append((text, cells[0][0], cells[-1][1]))
+
     return out
 
 
@@ -172,6 +190,7 @@ def join_visual_lines(lines: list[tuple[str, float, float]],
             result += text          # ligne haute justifiée → mot coupé → on colle
         else:
             result += " " + text    # frontière de mot → espace
+
     return result
 
 
@@ -184,6 +203,7 @@ def clean_description(description: str) -> str:
     description = sub(r"\s+", " ", description).strip()
     description = sub(r"McDonald\s+s\b", "McDonald's", description)
     description = sub(r"McDonald's\s+s\b", "McDonald's", description)
+
     return description
 
 
@@ -194,6 +214,7 @@ def numeric_value(text: str) -> str | None:
     :return: texte nettoyé si numérique, sinon None
     """
     cleaned = text.strip("()")
+
     return cleaned if fullmatch(r"[\d.,]+", cleaned) else None
 
 
@@ -208,29 +229,42 @@ def parse_page(page: pdfplumber.page.Page) -> list[dict]:
 
     rows = []
     for y_start, y_end in boundaries:
-        row_words = [w for w in words if y_start <= w["top"] < y_end]
+        row_words = [w for w in words if y_start <= w[TOP] < y_end]
 
         # Description : regroupement par ligne visuelle puis jointure par justification
         desc_lines = group_words_by_visual_line(
-            [w for w in row_words if w["column"] == "description"]
+            [w for w in row_words if w[COLUMN] == DESCRIPTION]
         )
         description = clean_description(
             join_visual_lines(desc_lines, col_right=DESC_RIGHT, tol=JUSTIFY_TOL)
         )
 
+        # récupération date/heure de la recharge
+        pattern = r', le\s+(\d+)\s+(\w+)\s+(\d{4})\s+à\s+(\d{2})h(\d{2})'
+        date_heure_brute = search(pattern, description)
+        if date_heure_brute:
+            jour, mois, annee, heure, minute = date_heure_brute.groups()
+            dt = datetime(
+                year=int(annee),
+                month=MOIS[mois.lower()],
+                day=int(jour),
+                hour=int(heure),
+                minute=int(minute)
+            )
+
         # Autres colonnes : identification par CONTENU (robuste au décalage de bornes)
         cells: dict[str, list[str]] = {col: [] for col in COLUMNS}
         for w in row_words:
-            cells[w["column"]].append(w["text"])
+            cells[w[COLUMN]].append(w[TEXT])
 
         # Regroupement par ligne visuelle (même 'top' arrondi), dans l'ordre de lecture
         by_top: dict[int, list[tuple[float, float]]] = {}  # top -> [(x0, valeur), ...]
         for w in row_words:
-            if w["x0"] < COLUMNS["pu_ht"][0]:
+            if w[X0] < COLUMNS[PU_HT][0]:
                 continue
-            val = numeric_value(w["text"])
+            val = numeric_value(w[TEXT])
             if val is not None:
-                by_top.setdefault(round(w["top"]), []).append((w["x0"], val))
+                by_top.setdefault(round(w[TOP]), []).append((w[X0], val))
 
         visual_lines = [
             [v for _, v in sorted(cells)]
@@ -262,12 +296,13 @@ def parse_page(page: pdfplumber.page.Page) -> list[dict]:
             pass
 
         rows.append({
-            "description": description,
-            "pu_ht": pu_ht,
-            "quantite": quantite,
-            "tva_pct": tva_pct,
-            "tva_montant": tva_montant,
-            "total_ht": total_ht,
+            DESCRIPTION: description,
+            DATE_HEURE: dt if date_heure_brute else "",
+            PU_HT: pu_ht,
+            QUANTITE: quantite,
+            TVA_PCT: tva_pct,
+            TVA_MONTANT: tva_montant,
+            TOTAL_HT: total_ht,
         })
 
     return rows
@@ -283,6 +318,7 @@ def parse_pdf(pdf_path: Path) -> list[dict]:
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             all_rows.extend(parse_page(page))
+
     return all_rows
 
 
@@ -301,7 +337,7 @@ def to_float(val: str) -> float | None:
         return None
 
 
-def export(recharges: list[dict[str, str]], output: str = "facture_chargemap.ods"):
+def export(recharges: list[dict[str, str]], output: str = "facture_chargemap.ods") -> None:
     """Exporte vers ODS ou XLSX.
 
     :param recharges: liste des recharges
@@ -309,9 +345,20 @@ def export(recharges: list[dict[str, str]], output: str = "facture_chargemap.ods
     """
     df = pd.DataFrame(recharges)
 
-    for col in ["pu_ht", "tva_montant", "tva_pct", "total_ht"]:
+    for col in [PU_HT, TVA_MONTANT, TVA_PCT, TOTAL_HT]:
         df[col] = df[col].map(to_float)
-    df["quantite"] = pd.to_numeric(df["quantite"], errors="coerce")
+
+    df[QUANTITE] = pd.to_numeric(df[QUANTITE], errors=COERCE)
+    df[DATE_HEURE] = pd.to_datetime(df[DATE_HEURE], errors=COERCE)
+
+    # création de la colonne total_ttc
+    df["total_ttc"] = df[TOTAL_HT] + df[TVA_MONTANT]
+    # création de la colonne mois
+    df["mois"] = df[DATE_HEURE].dt.to_period("M") 
+    ordre = ["description", "date_hxwwwwwwwwwwwwwwwwwwwwwwwwwwwwweure", "mois",
+            "pu_ht", "quantite", "tva_pct", "tva_montant",
+            "total_ht", "total_ttc"]
+    df = df[ordre]
 
     engine = "odf" if output.endswith(".ods") else "openpyxl"
     with pd.ExcelWriter(output, engine=engine) as writer:
@@ -329,7 +376,7 @@ def debug_positions(pdf_path: str) -> None:
         words = pdf.pages[0].extract_words(x_tolerance=2, y_tolerance=3)
         with open("positions_debug.txt", "w", encoding="utf-8") as f:
             for w in words:
-                f.write(f"  x0={w['x0']:05.1f}  x1={w['x1']:05.1f}  top={w['top']:05.1f}  '{w['text']}'\n")
+                f.write(f"  x0={w[X0]:05.1f}  x1={w[X1]:05.1f}  top={w[TOP]:05.1f}  '{w[TEXT]}'\n")
 
 
 if __name__ == "__main__":
