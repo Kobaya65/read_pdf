@@ -11,6 +11,7 @@ Sinon on insère un espace. La marge est le x0 du mot "Charge" en tête de ligne
 La casse est ignorée, car elle ne porte aucune information fiable.
 """
 from datetime import datetime
+from openpyxl.styles import numbers as xl_numbers
 from os import listdir
 from pathlib import Path
 from re import compile, fullmatch, search, sub
@@ -25,6 +26,7 @@ COERCE = "coerce"
 COLUMN = "column"
 DATE_HEURE = "date_heure"
 DESCRIPTION = "description"
+MOIS = "mois"
 PU_HT = "pu_ht"
 QUANTITE = "quantite"
 TEXT = "text"
@@ -32,6 +34,7 @@ TOP = "top"
 TVA_MONTANT = "tva_montant"
 TVA_PCT = "tva_pct"
 TOTAL_HT = "total_ht"
+TOTAL_TTC = "total_ttc"
 X0 = "x0"
 X1 = "x1"
 
@@ -45,7 +48,7 @@ COLUMNS = {
     TVA_MONTANT: (540, 600),
     TOTAL_HT:    (600, 700),
 }
-MOIS = {
+MOIS_DICT = {
     "janvier": 1, "février": 2, "mars": 3, "avril": 4, "mai": 5, "juin": 6,
     "juillet": 7, "août": 8, "septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12
 }
@@ -56,7 +59,7 @@ LEFT_MARGIN_TOL = 2.0
 
 def main() -> None:
     pdf_path = CHARGEMAP_PATH
-    output = Path(CHARGEMAP_PATH, "factures_chargemap.ods")
+    output = Path(CHARGEMAP_PATH, "factures_chargemap.xlsx")
     recharges = []
 
     if not Path(pdf_path).exists():
@@ -251,7 +254,7 @@ def parse_page(page: pdfplumber.page.Page) -> list[dict]: # type: ignore
             jour, mois, annee, heure, minute, lieu = donnees_brutes.groups()
             dt = datetime(
                 year=int(annee),
-                month=MOIS[mois.lower()],
+                month=MOIS_DICT[mois.lower()],
                 day=int(jour),
                 hour=int(heure),
                 minute=int(minute),
@@ -353,19 +356,46 @@ def export(recharges: list[dict], output: Path) -> None:
     df[DATE_HEURE] = pd.to_datetime(df[DATE_HEURE], errors=COERCE)
 
     # création de la colonne total_ttc
-    df["total_ttc"] = df[TOTAL_HT] + df[TVA_MONTANT]
+    df[TOTAL_TTC] = df[TOTAL_HT] + df[TVA_MONTANT]
     # création de la colonne mois
-    df["mois"] = df[DATE_HEURE].dt.to_period("M")
-    ordre = ["description", "date_heure", "mois",
-             "pu_ht", "quantite", "tva_pct", "tva_montant",
-             "total_ht", "total_ttc"]
+    df[MOIS] = df[DATE_HEURE].dt.to_period("M")
+    ordre = [DESCRIPTION, DATE_HEURE, MOIS,
+             PU_HT, QUANTITE, TVA_PCT, TVA_MONTANT,
+             TOTAL_HT, TOTAL_TTC]
     df = df[ordre]
 
-    engine = "odf" if str(output).endswith(".ods") else "openpyxl"
-    with pd.ExcelWriter(output, engine=engine) as writer:
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="Recharges", index=False)
+        apply_formats(writer, "Recharges", df)
 
     print(f"✅ {len(df)} lignes → {output}")
+
+
+def apply_formats(writer: "pd.ExcelWriter", sheet: str, df: pd.DataFrame) -> None:
+    """Applique les formats de nombre sur les colonnes concernées.
+
+    - date_heure  -> jj/mm/aaaa hh:mm
+    - pu_ht, tva_montant, total_ht, total_ttc -> monnaie (2 décimales, €)
+
+    :param writer: le contexte ExcelWriter encore ouvert
+    :param sheet: nom de la feuille
+    :param df: le DataFrame écrit (pour retrouver l'index des colonnes)
+    """
+    date_cols = [DATE_HEURE]
+    money_cols = [PU_HT, TVA_MONTANT, TOTAL_HT, TOTAL_TTC]
+
+    ws = writer.sheets[sheet]
+    col_index = {name: i + 1 for i, name in enumerate(df.columns)}
+    # +1 car la ligne 1 = en-têtes
+    for name in date_cols:
+        ci = col_index[name]
+        for row in range(2, len(df) + 2):
+            ws.cell(row=row, column=ci).number_format = "DD/MM/YYYY HH:MM"
+
+    for name in money_cols:
+        ci = col_index[name]
+        for row in range(2, len(df) + 2):
+            ws.cell(row=row, column=ci).number_format = '#,##0.00\\ "€"'
 
 
 if __name__ == "__main__":
