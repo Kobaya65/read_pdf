@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
-"""
-Extraction des factures Chargemap via pdfplumber.
+"""Extraction des factures Chargemap via pdfplumber.
 
 Stratégie : découpage spatial en colonnes (par x) et lignes logiques (par y).
 Une description qui wrappe sur 2 lignes visuelles reste dans la même cellule
 car la "ligne logique" est délimitée par les marqueurs "Charge effectuée".
 
-Jointure des lignes visuelles : on colle deux lignes quand la ligne du haut est
-JUSTIFIÉE (son dernier mot atteint la marge droite de la colonne), signe d'une
-coupure de mot. Sinon on insère un espace. La casse est ignorée, car elle ne
-porte aucune information fiable (ex : "Mc" + "Donald" = coupure avec majuscule).
-
-EVOLUTION
-- extraire date et heure de description pour les mettre dans des colonnes séparées
+Jointure des lignes visuelles : on colle deux lignes quand la seconde reprend à
+la MARGE GAUCHE de la colonne description (= mot coupé par le retour à la ligne).
+Sinon on insère un espace. La marge est le x0 du mot "Charge" en tête de ligne.
+La casse est ignorée, car elle ne porte aucune information fiable.
 """
 from datetime import datetime
 from os import listdir
 from pathlib import Path
 from re import compile, fullmatch, search, sub
-from sys import argv, exit
+from sys import exit
 
 import pandas as pd
 import pdfplumber
@@ -50,19 +46,17 @@ COLUMNS = {
     TOTAL_HT:    (600, 700),
 }
 MOIS = {
-    "janvier": 1, "février": 2, "mars": 3, "avril": 4,"mai": 5, "juin": 6,
+    "janvier": 1, "février": 2, "mars": 3, "avril": 4, "mai": 5, "juin": 6,
     "juillet": 7, "août": 8, "septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12
 }
 
-# Borne droite de la zone de rendu de la colonne description, utilisée pour
-# détecter la justification. À calibrer via le mode debug si besoin.
-DESC_RIGHT = COLUMNS[DESCRIPTION][1]
-JUSTIFY_TOL = 2.0  # tolérance en points pour considérer que la marge est atteinte
+# Tolérance en points pour décider qu'une ligne reprend à la marge gauche.
+LEFT_MARGIN_TOL = 2.0
 
 
 def main() -> None:
-    pdf_path = argv[1] if len(argv) > 1 else CHARGEMAP_PATH
-    output = argv[2] if len(argv) > 2 else Path(CHARGEMAP_PATH, "factures_chargemap.ods")
+    pdf_path = CHARGEMAP_PATH
+    output = Path(CHARGEMAP_PATH, "factures_chargemap.ods")
     recharges = []
 
     if not Path(pdf_path).exists():
@@ -70,7 +64,6 @@ def main() -> None:
         exit(1)
 
     pattern = compile(r'^\d{8}-\d{8}\.pdf$')
-
     files = [f for f in listdir(pdf_path) if pattern.match(f)]
 
     for f in files:
@@ -78,13 +71,12 @@ def main() -> None:
         recharges.extend(parse_pdf(file))
 
     if not recharges:
-        print("⚠️  Aucune ligne extraite. Ajustez les bornes COLUMNS / DESC_RIGHT.")
-        debug_positions(pdf_path)
+        print("⚠️  Aucune ligne extraite. Ajustez les bornes COLUMNS.")
     else:
         export(recharges, output)
 
 
-def extract_words_by_column(page: pdfplumber.page.Page) -> list[dict]:
+def extract_words_by_column(page: pdfplumber.page.Page) -> list[dict]: # type: ignore
     """Extrait tous les mots de la page et les assigne à une colonne selon leur x.
     Retourne une liste de dicts : {"text", "x0", "x1", "top", "bottom", "column"}
 
@@ -120,21 +112,31 @@ def extract_words_by_column(page: pdfplumber.page.Page) -> list[dict]:
 
 
 def find_row_boundaries(words: list[dict]) -> list[tuple[float, float]]:
-    """Identifie les lignes logiques en cherchant les mots "Charge" qui marquent
-    le début de chaque entrée. La borne basse est bornée par la fin de la zone
-    de données (pied de page exclu). Retourne une liste de (y_start, y_end).
+    """Identifie les lignes logiques via le mot "Charge" en TÊTE de ligne
+    (le mot le plus à gauche de sa ligne visuelle), ce qui exclut les
+    occurrences internes comme "Easy Charge Services". La borne basse est
+    bornée par la fin de la zone de données (pied de page exclu).
 
     :param words: liste des mots avec leur position et colonne assignée
     :return: liste de (y_start, y_end) pour chaque ligne logique
     """
+    # x0 minimal par ligne visuelle (toutes colonnes confondues)
+    leftmost_by_top: dict[int, float] = {}
+    for w in words:
+        t = round(w[TOP])
+        if t not in leftmost_by_top or w[X0] < leftmost_by_top[t]:
+            leftmost_by_top[t] = w[X0]
+
+    # Un "Charge" valide est le mot le plus à gauche de sa ligne
     charge_tops = sorted(
         w[TOP] for w in words
-        if w[COLUMN] == DESCRIPTION and w[TEXT] == "Charge"
+        if w[COLUMN] == DESCRIPTION
+        and w[TEXT] == "Charge"
+        and abs(w[X0] - leftmost_by_top[round(w[TOP])]) < 1.0
     )
     if not charge_tops:
         return []
 
-    # Fin de zone de données : premier marqueur de total / pied de page
     END_MARKERS = {"Total", "Conditions", "Chargemap", "Net"}
     end_candidates = [
         w[TOP] for w in words
@@ -154,8 +156,8 @@ def group_words_by_visual_line(words_in_col: list[dict]) -> list[tuple[str, floa
     """Retourne une liste de (texte, x0_premier_mot, x1_dernier_mot), une entrée
     par ligne visuelle (même 'top' arrondi).
 
-    :param words_in_col: liste des mots d'une colonne (ex: description) pour une ligne logique
-    :return : liste des lignes visuelles avec leur texte et positions x
+    :param words_in_col: liste des mots d'une colonne pour une ligne logique
+    :return: liste des lignes visuelles avec leur texte et positions x
     """
     by_top: dict[int, list[tuple[float, float, str]]] = {}
     for w in words_in_col:
@@ -172,25 +174,24 @@ def group_words_by_visual_line(words_in_col: list[dict]) -> list[tuple[str, floa
 
 
 def join_visual_lines(lines: list[tuple[str, float, float]],
-                      col_right: float,
-                      tol: float = 2.0) -> str:
-    """Joint des lignes visuelles en une chaîne.
-    Colle (sans espace) si la ligne précédente est justifiée, c.-à-d. que son
-    dernier mot atteint la marge droite de la colonne (= mot coupé).
-    Sinon, insère un espace.
+                      left_margin: float,
+                      tol: float = LEFT_MARGIN_TOL) -> str:
+    """Colle deux lignes si la seconde reprend à la marge gauche de la colonne
+    (= mot coupé par le retour à la ligne), sinon insère un espace.
 
-    :param lines: liste de (texte_ligne, x0_premier_mot, x1_dernier_mot)
-    :param col_right: borne droite de la zone de rendu de la colonne
-    :param tol: tolérance en points pour considérer que la marge est atteinte
+    :param lines: liste de (texte, x0_premier_mot, x1_dernier_mot)
+    :param left_margin: x0 de la marge gauche (le "Charge" en tête de ligne)
+    :param tol: tolérance en points
+    :return: description sur une seule ligne
     """
     if not lines:
         return ""
     result = lines[0][0]
-    for text, _x0, x1 in lines[1:]:
-        if x1 >= col_right - tol:
-            result += text          # ligne haute justifiée → mot coupé → on colle
+    for text, x0, _x1 in lines[1:]:
+        if x0 <= left_margin + tol:
+            result += text          # reprise à la marge → mot coupé → on colle
         else:
-            result += " " + text    # frontière de mot → espace
+            result += " " + text    # sinon → frontière de mot → espace
 
     return result
 
@@ -198,7 +199,7 @@ def join_visual_lines(lines: list[tuple[str, float, float]],
 def clean_description(description: str) -> str:
     """Normalise les artefacts restants (apostrophe perdue, espaces multiples).
 
-    :param description: description brute extraite du PDF
+    :param description: description brute jointe
     :return: description normalisée
     """
     description = sub(r"\s+", " ", description).strip()
@@ -209,7 +210,8 @@ def clean_description(description: str) -> str:
 
 
 def numeric_value(text: str) -> str | None:
-    """Tokens numériques de la zone droite, en retirant les parenthèses.
+    """Retourne la valeur numérique d'un token en retirant les parenthèses
+    (pdfplumber renvoie "(1.25"), ou None si le token n'est pas numérique.
 
     :param text: texte brut
     :return: texte nettoyé si numérique, sinon None
@@ -219,7 +221,7 @@ def numeric_value(text: str) -> str | None:
     return cleaned if fullmatch(r"[\d.,]+", cleaned) else None
 
 
-def parse_page(page: pdfplumber.page.Page) -> list[dict]:
+def parse_page(page: pdfplumber.page.Page) -> list[dict]: # type: ignore
     """Parse une page et retourne les lignes de charges.
 
     :param page: page du pdf
@@ -232,40 +234,38 @@ def parse_page(page: pdfplumber.page.Page) -> list[dict]:
     for y_start, y_end in boundaries:
         row_words = [w for w in words if y_start <= w[TOP] < y_end]
 
-        # Description : regroupement par ligne visuelle puis jointure par justification
-        desc_lines = group_words_by_visual_line(
-            [w for w in row_words if w[COLUMN] == DESCRIPTION]
-        )
+        # Description : marge gauche = x0 du mot le plus à gauche (le "Charge"),
+        # puis regroupement par ligne visuelle et jointure par marge gauche.
+        desc_words = [w for w in row_words if w[COLUMN] == DESCRIPTION]
+        left_margin = min(w[X0] for w in desc_words) if desc_words else 0.0
+        desc_lines = group_words_by_visual_line(desc_words)
         description = clean_description(
-            join_visual_lines(desc_lines, col_right=DESC_RIGHT, tol=JUSTIFY_TOL)
+            join_visual_lines(desc_lines, left_margin=left_margin)
         )
 
-        # récupération date/heure de la recharge
-        pattern = r', le\s+(\d+)\s+(\w+)\s+(\d{4})\s+à\s+(\d{2})h(\d{2})'
-        date_heure_brute = search(pattern, description)
-        if date_heure_brute:
-            jour, mois, annee, heure, minute = date_heure_brute.groups()
+        # Récupération date/heure de la recharge
+        dt = jour = mois = annee = heure = minute = lieu = None
+        pattern = r', le\s+(\d+)\s+(\w+)\s+(\d{4})\s+à\s+(\d{2})h(\d{2})\sà\s(.+)$'
+        donnees_brutes = search(pattern, description)
+        if donnees_brutes:
+            jour, mois, annee, heure, minute, lieu = donnees_brutes.groups()
             dt = datetime(
                 year=int(annee),
                 month=MOIS[mois.lower()],
                 day=int(jour),
                 hour=int(heure),
-                minute=int(minute)
+                minute=int(minute),
             )
 
         # Autres colonnes : identification par CONTENU (robuste au décalage de bornes)
-        cells: dict[str, list[str]] = {col: [] for col in COLUMNS}
-        for w in row_words:
-            cells[w[COLUMN]].append(w[TEXT])
-
         # Regroupement par ligne visuelle (même 'top' arrondi), dans l'ordre de lecture
-        by_top: dict[int, list[tuple[float, float]]] = {}  # top -> [(x0, valeur), ...]
+        by_top: dict[int, list[tuple[float, str]]] = {}
         for w in row_words:
             if w[X0] < COLUMNS[PU_HT][0]:
                 continue
             val = numeric_value(w[TEXT])
             if val is not None:
-                by_top.setdefault(round(w[TOP]), []).append((w[X0], val))
+                by_top.setdefault(round(w[TOP]), []).append((w[X0], str(val)))
 
         visual_lines = [
             [v for _, v in sorted(cells)]
@@ -297,8 +297,8 @@ def parse_page(page: pdfplumber.page.Page) -> list[dict]:
             pass
 
         rows.append({
-            DESCRIPTION: description,
-            DATE_HEURE: dt if date_heure_brute else "",
+            DESCRIPTION: lieu,
+            DATE_HEURE: dt,
             PU_HT: pu_ht,
             QUANTITE: quantite,
             TVA_PCT: tva_pct,
@@ -338,7 +338,7 @@ def to_float(val: str) -> float | None:
         return None
 
 
-def export(recharges: list[dict[str, str]], output: Path) -> None:
+def export(recharges: list[dict], output: Path) -> None:
     """Exporte vers ODS ou XLSX.
 
     :param recharges: liste des recharges
@@ -355,29 +355,17 @@ def export(recharges: list[dict[str, str]], output: Path) -> None:
     # création de la colonne total_ttc
     df["total_ttc"] = df[TOTAL_HT] + df[TVA_MONTANT]
     # création de la colonne mois
-    df["mois"] = df[DATE_HEURE].dt.to_period("M") 
+    df["mois"] = df[DATE_HEURE].dt.to_period("M")
     ordre = ["description", "date_heure", "mois",
-            "pu_ht", "quantite", "tva_pct", "tva_montant",
-            "total_ht", "total_ttc"]
+             "pu_ht", "quantite", "tva_pct", "tva_montant",
+             "total_ht", "total_ttc"]
     df = df[ordre]
 
-    engine = "odf" if output.__str__().endswith(".ods") else "openpyxl"
+    engine = "odf" if str(output).endswith(".ods") else "openpyxl"
     with pd.ExcelWriter(output, engine=engine) as writer:
         df.to_excel(writer, sheet_name="Recharges", index=False)
 
     print(f"✅ {len(df)} lignes → {output}")
-
-
-def debug_positions(pdf_path: str) -> None:
-    """Affiche les positions x des mots pour calibrer COLUMNS et DESC_RIGHT.
-
-    :param pdf_path: chemin vers le fichier PDF
-    """
-    with pdfplumber.open(pdf_path) as pdf:
-        words = pdf.pages[0].extract_words(x_tolerance=2, y_tolerance=3)
-        with open("positions_debug.txt", "w", encoding="utf-8") as f:
-            for w in words:
-                f.write(f"  x0={w[X0]:05.1f}  x1={w[X1]:05.1f}  top={w[TOP]:05.1f}  '{w[TEXT]}'\n")
 
 
 if __name__ == "__main__":
