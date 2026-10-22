@@ -11,12 +11,13 @@ Sinon on insère un espace. La marge est le x0 du mot "Charge" en tête de ligne
 La casse est ignorée, car elle ne porte aucune information fiable.
 """
 from datetime import datetime
-from openpyxl.styles import numbers as xl_numbers
 from os import listdir
 from pathlib import Path
 from re import compile, fullmatch, search, sub
 from sys import exit
 
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
 import pandas as pd
 import pdfplumber
 
@@ -371,7 +372,7 @@ def export(recharges: list[dict], output: Path) -> None:
     print(f"✅ {len(df)} lignes → {output}")
 
 
-def apply_formats(writer: "pd.ExcelWriter", sheet: str, df: pd.DataFrame) -> None:
+def apply_formats(writer: pd.ExcelWriter, sheet: str, df: pd.DataFrame) -> None:
     """Applique les formats de nombre sur les colonnes concernées.
 
     - date_heure  -> jj/mm/aaaa hh:mm
@@ -396,6 +397,25 @@ def apply_formats(writer: "pd.ExcelWriter", sheet: str, df: pd.DataFrame) -> Non
         ci = col_index[name]
         for row in range(2, len(df) + 2):
             ws.cell(row=row, column=ci).number_format = '#,##0.00\\ "€"'
+
+    # Figer la ligne d'en-têtes
+    ws.freeze_panes = "A2"
+
+    # Style des en-têtes
+    header_font = Font(bold=True)
+    header_alignment = Alignment(horizontal="center", vertical="center")
+
+    for col_idx in range(1, len(df.columns) + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = header_font
+        cell.alignment = header_alignment
+
+    # Largeur des colonnes
+    for col_idx, col_name in enumerate(df.columns, start=1):
+        header_len = len(str(col_name))
+        max_data_len = df[col_name].astype(str).str.len().max() if len(df) > 0 else 0
+        width = min(max(header_len, max_data_len) + 2, 50)
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
 
 
 if __name__ == "__main__":
